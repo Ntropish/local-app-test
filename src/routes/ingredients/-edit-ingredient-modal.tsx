@@ -19,15 +19,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../../components/ui/select'
-import { db, ingredients, waitForDB } from '../../db'
+import { ingredients } from '../../db'
+import { useDatabase } from '../../db/database-context'
 import { eq } from 'drizzle-orm'
+import { unitsOfMeasurement, type UnitOfMeasurement } from '../../db/enums'
 
 interface Ingredient {
   id: number
   title: string
   description: string | null
-  unitOfMeasurement: string | null
-  baseValue: number
+  unit_of_measurement: UnitOfMeasurement | null
+  base_value: number
 }
 
 interface EditIngredientModalProps {
@@ -40,70 +42,44 @@ export function EditIngredientModal({
   onClose,
 }: EditIngredientModalProps) {
   const queryClient = useQueryClient()
+  const { db, isInitialized } = useDatabase()
 
-  const [formData, setFormData] = useState<Partial<Ingredient>>({
-    title: '',
-    description: '',
-    unitOfMeasurement: null,
-    baseValue: 0,
-  })
+  // 'pendingChanges' will hold only the fields the user has modified.
+  const [pendingChanges, setPendingChanges] = useState<Partial<Ingredient>>({})
 
-  // Fetch the ingredient to edit
+  // Fetch the ingredient to edit. This is the source of truth for the form.
   const { data: ingredient, isLoading } = useQuery({
     queryKey: ['ingredient', editId],
     queryFn: async () => {
-      if (!editId) return null
-      await waitForDB()
+      if (!db || !editId)
+        throw new Error('Database not initialized or no edit ID')
+
       const result = await db
         .select()
         .from(ingredients)
-        .where(eq(ingredients.id, editId))
+        .where(eq(ingredients.id, Number(editId)))
         .get()
 
-      // Handle the nested array structure
-      if (result && typeof result === 'object' && Array.isArray(result.id)) {
-        const data = result.id
-        return {
-          id: data[0],
-          title: data[1],
-          description: data[2],
-          unitOfMeasurement: data[3],
-          baseValue: data[4],
-        }
-      }
-      return result || null
+      return result
     },
-    enabled: !!editId,
+    enabled: !!editId && isInitialized && !!db,
   })
 
-  console.log({
-    ingredient,
-    editId,
-    isLoading,
-    formData,
-  })
-
-  // Update form data when ingredient is loaded
+  // When the modal opens for a new ingredient (i.e., editId changes),
+  // we must reset any lingering pending changes from a previous edit.
   useEffect(() => {
-    if (ingredient) {
-      setFormData({
-        title: ingredient.title,
-        description: ingredient.description || '',
-        unitOfMeasurement: ingredient.unitOfMeasurement || null,
-        baseValue: ingredient.baseValue,
-      })
-    }
-  }, [ingredient])
+    setPendingChanges({})
+  }, [editId])
 
   // Update ingredient mutation
   const updateIngredientMutation = useMutation({
     mutationFn: async (updatedIngredient: Partial<Ingredient>) => {
-      if (!editId) throw new Error('No ingredient ID provided')
-      await waitForDB()
+      if (!editId || !db)
+        throw new Error('No ingredient ID provided or database not initialized')
       return await db
         .update(ingredients)
         .set(updatedIngredient)
-        .where(eq(ingredients.id, editId))
+        .where(eq(ingredients.id, Number(editId)))
         .returning()
     },
     onSuccess: () => {
@@ -115,17 +91,26 @@ export function EditIngredientModal({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!formData.title || formData.baseValue === undefined) return
+    // A title is always required. Check the pending change or the original.
+    const finalTitle = pendingChanges.title ?? ingredient?.title
+    if (!finalTitle) return
 
-    updateIngredientMutation.mutate({
-      title: formData.title,
-      description: formData.description || null,
-      unitOfMeasurement: formData.unitOfMeasurement || null,
-      baseValue: formData.baseValue,
-    })
+    // Only submit if there are actual changes.
+    if (Object.keys(pendingChanges).length === 0) {
+      onClose() // No changes, just close the modal.
+      return
+    }
+
+    updateIngredientMutation.mutate(pendingChanges)
   }
 
   const isOpen = !!editId
+
+  // For display, we use the pending change if it exists, otherwise the original ingredient data.
+  const displayIngredient = {
+    ...ingredient,
+    ...pendingChanges,
+  }
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
@@ -147,9 +132,12 @@ export function EditIngredientModal({
               <Label htmlFor="title">Name</Label>
               <Input
                 id="title"
-                value={formData.title || ''}
+                value={displayIngredient.title || ''}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                  setFormData((prev) => ({ ...prev, title: e.target.value }))
+                  setPendingChanges((prev) => ({
+                    ...prev,
+                    title: e.target.value,
+                  }))
                 }
                 placeholder="Ingredient name"
                 required
@@ -160,9 +148,9 @@ export function EditIngredientModal({
               <Label htmlFor="description">Description</Label>
               <Textarea
                 id="description"
-                value={formData.description}
+                value={displayIngredient.description ?? ''}
                 onChange={(e) =>
-                  setFormData((prev) => ({
+                  setPendingChanges((prev) => ({
                     ...prev,
                     description: e.target.value,
                   }))
@@ -175,27 +163,25 @@ export function EditIngredientModal({
             <div className="space-y-2">
               <Label htmlFor="unit">Unit of Measurement</Label>
               <Select
-                value={formData.unitOfMeasurement || 'none'}
-                onValueChange={(value) =>
-                  setFormData((prev) => ({
+                value={displayIngredient.unit_of_measurement ?? 'none'}
+                onValueChange={(value: UnitOfMeasurement | 'none') => {
+                  setPendingChanges((prev) => ({
                     ...prev,
-                    unitOfMeasurement: value === 'none' ? null : value,
+                    unit_of_measurement: value === 'none' ? null : value,
                   }))
-                }
+                }}
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Select a unit" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">None</SelectItem>
-                  <SelectItem value="grams">Grams</SelectItem>
-                  <SelectItem value="kilograms">Kilograms</SelectItem>
-                  <SelectItem value="ounces">Ounces</SelectItem>
-                  <SelectItem value="pounds">Pounds</SelectItem>
-                  <SelectItem value="cups">Cups</SelectItem>
-                  <SelectItem value="tablespoons">Tablespoons</SelectItem>
-                  <SelectItem value="teaspoons">Teaspoons</SelectItem>
-                  <SelectItem value="pieces">Pieces</SelectItem>
+                  {unitsOfMeasurement.map((unit) => (
+                    <SelectItem key={unit} value={unit}>
+                      {/* Simple title case for display */}
+                      {unit.charAt(0).toUpperCase() + unit.slice(1)}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -207,11 +193,11 @@ export function EditIngredientModal({
                 type="number"
                 step="0.01"
                 min="0"
-                value={formData.baseValue}
+                value={displayIngredient.base_value ?? 0}
                 onChange={(e) =>
-                  setFormData((prev) => ({
+                  setPendingChanges((prev) => ({
                     ...prev,
-                    baseValue: parseFloat(e.target.value) || 0,
+                    base_value: parseFloat(e.target.value) || 0,
                   }))
                 }
                 placeholder="0.00"
@@ -225,7 +211,11 @@ export function EditIngredientModal({
               </Button>
               <Button
                 type="submit"
-                disabled={updateIngredientMutation.isPending || !formData.title}
+                disabled={
+                  updateIngredientMutation.isPending ||
+                  !displayIngredient.title ||
+                  Object.keys(pendingChanges).length === 0
+                }
               >
                 {updateIngredientMutation.isPending
                   ? 'Saving...'

@@ -4,9 +4,17 @@ import * as schema from './schema'
 import { error, log } from './utils'
 import { seed } from './seed'
 
-const worker = new Worker(new URL('./sqlite-worker.ts', import.meta.url), {
+let worker = new Worker(new URL('./sqlite-worker.ts', import.meta.url), {
   type: 'module',
 })
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    if (worker) {
+      worker.terminate()
+    }
+  })
+}
 
 const awaiting: Record<
   string,
@@ -38,10 +46,10 @@ worker.onmessage = (e) => {
       break
     }
     case 'exec-finished': {
-      const { id, rows } = payload
+      const { id, rows, columns } = payload
       const promise = awaiting[id]
       if (promise) {
-        promise.resolve({ rows })
+        promise.resolve({ rows, columns })
         delete awaiting[id]
       }
       break
@@ -65,7 +73,7 @@ worker.onmessage = (e) => {
 const customProxy = async (
   sql: string,
   params: any[],
-): Promise<{ rows: any[] }> => {
+): Promise<{ rows: any[]; columns?: string[] }> => {
   const id = uuid()
   return new Promise((resolve, reject) => {
     awaiting[id] = { resolve, reject }
@@ -76,7 +84,11 @@ const customProxy = async (
   })
 }
 
-export const db = drizzle(customProxy, { schema })
+let db = drizzle(customProxy, { schema })
+
+// Export a getter function to always get the current db instance
+export const getDb = () => db
+export { db }
 
 const runMigrations = async () => {
   // First, ensure the migrations table exists
@@ -206,7 +218,10 @@ const initializeSQLite = async () => {
       log('[initializeSQLite] Call worker.postMessage')
       initResolve = resolve
       initReject = reject
-      worker.postMessage({ type: 'init' })
+      worker.postMessage({
+        type: 'init',
+        payload: { filename: '/mydb.sqlite3' },
+      })
       log(
         '[initializeSQLite] Init message sent, waiting for worker response...',
       )
@@ -235,9 +250,6 @@ const initializeSQLite = async () => {
       throw err
     })
 }
-
-// Create the initialization promise
-initPromise = initializeSQLite()
 
 // Export a function to wait for initialization
 export const waitForDB = async () => {
@@ -286,19 +298,122 @@ const initializeGlobalFunctions = () => {
   if (typeof window !== 'undefined') {
     window.resetDatabase = async () => {
       try {
-        await waitForDB() // Ensure database is ready
-        await resetDatabaseForDevelopment()
-        // Reload the page to reflect the reset
-        window.location.reload()
+        console.log('resetting database')
+
+        // Reset local state first
+        isInitialized = false
+        initPromise = null
+        initResolve = null
+        initReject = null
+
+        // Clear any pending requests
+        Object.keys(awaiting).forEach((id) => {
+          const promise = awaiting[id]
+          if (promise) {
+            promise.reject(new Error('Database reset in progress'))
+            delete awaiting[id]
+          }
+        })
+
+        // Terminate the current worker and create a new one
+        worker.terminate()
+
+        // Create a fresh worker with a unique database filename
+        const timestamp = Date.now()
+        const dbFilename = `/mydb_${timestamp}.sqlite3`
+
+        const newWorker = new Worker(
+          new URL('./sqlite-worker.ts', import.meta.url),
+          {
+            type: 'module',
+          },
+        )
+
+        // Set up the new worker's message handler
+        newWorker.onmessage = worker.onmessage
+
+        // Replace the old worker
+        worker = newWorker
+
+        // Send init message with custom filename
+        worker.postMessage({
+          type: 'init',
+          payload: { filename: dbFilename },
+        })
+
+        // Wait for initialization
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(
+              new Error('Database initialization timeout after 10 seconds'),
+            )
+          }, 10000)
+
+          const originalHandler = worker.onmessage
+          const tempHandler = (e: MessageEvent) => {
+            if (e.data.type === 'init-finished') {
+              clearTimeout(timeout)
+              worker.onmessage = originalHandler
+              resolve()
+            } else if (
+              e.data.type === 'exec-error' &&
+              e.data.payload.error.includes('init')
+            ) {
+              clearTimeout(timeout)
+              worker.onmessage = originalHandler
+              reject(new Error(e.data.payload.error))
+            } else if (originalHandler) {
+              originalHandler.call(worker, e)
+            }
+          }
+          worker.onmessage = tempHandler
+        })
+
+        // Now run migrations on the fresh database
+        await runMigrations()
+
+        // Update the global database instance to use the new worker
+        // This is crucial because Drizzle caches the connection
+        const newCustomProxy = async (
+          sql: string,
+          params: any[],
+        ): Promise<{ rows: any[]; columns?: string[] }> => {
+          const id = uuid()
+          return new Promise((resolve, reject) => {
+            awaiting[id] = { resolve, reject }
+            worker.postMessage({
+              type: 'exec',
+              payload: { id, sql, params },
+            })
+          })
+        }
+
+        // Recreate the Drizzle instance with the new worker
+        const newDb = drizzle(newCustomProxy, { schema })
+
+        // Replace the global db instance
+        db = newDb
+
+        // Mark the database as initialized
+        isInitialized = true
+
+        console.log('Database reset completed successfully')
+        // Note: No page reload needed since we properly reset the database state
       } catch (error) {
         console.error('Failed to reset database:', error)
+        // Even if reset fails, try to reinitialize
+        try {
+          await initializeSQLite()
+        } catch (reinitError) {
+          console.error(
+            'Failed to reinitialize database after reset:',
+            reinitError,
+          )
+        }
       }
     }
     console.log('Database reset function available at window.resetDatabase()')
   }
 }
 
-// Call this after database initialization
-initPromise?.then(() => {
-  initializeGlobalFunctions()
-})
+initializeGlobalFunctions()

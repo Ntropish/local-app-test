@@ -14,7 +14,7 @@ import {
   type FilterFn,
 } from '@tanstack/react-table'
 import { rankItem } from '@tanstack/match-sorter-utils'
-import { desc, asc, sql } from 'drizzle-orm'
+import { desc, asc, sql, count } from 'drizzle-orm'
 import { Button } from '../../components/ui/button'
 import {
   Card,
@@ -24,8 +24,10 @@ import {
   CardHeader,
   CardTitle,
 } from '../../components/ui/card'
-import { db, ingredients, waitForDB } from '../../db'
+import { ingredients } from '../../db'
+import { useDatabase } from '../../db/database-context'
 import { EditIngredientModal } from './-edit-ingredient-modal'
+import { unitsOfMeasurement } from '../../db/enums'
 
 export const Route = createFileRoute('/ingredients/')({
   component: RouteComponent,
@@ -35,8 +37,8 @@ interface Ingredient {
   id: number
   title: string
   description: string | null
-  unitOfMeasurement: string | null
-  baseValue: number
+  unit_of_measurement: string | null
+  base_value: number
 }
 
 interface TableState {
@@ -67,6 +69,7 @@ function RouteComponent() {
   } = Route.useSearch()
   const navigate = Route.useNavigate()
   const queryClient = useQueryClient()
+  const { db, isInitialized, resetDatabase } = useDatabase()
 
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
   const [globalFilter, setGlobalFilter] = useState(search || '')
@@ -79,7 +82,7 @@ function RouteComponent() {
   } = useQuery({
     queryKey: ['ingredients', { page, pageSize }],
     queryFn: async () => {
-      await waitForDB()
+      if (!db) throw new Error('Database not initialized')
 
       const offset = (page - 1) * pageSize
 
@@ -88,28 +91,28 @@ function RouteComponent() {
 
       return await query.all()
     },
-    enabled: true,
+    enabled: isInitialized && !!db,
   })
 
   // Get total count for pagination
   const { data: totalCount = 0 } = useQuery({
     queryKey: ['ingredients-count'],
     queryFn: async () => {
-      await waitForDB()
+      if (!db) throw new Error('Database not initialized')
 
-      const result = await db
-        .select({ count: sql<number>`count(*)` })
-        .from(ingredients)
-        .get()
+      // Use Drizzle's count function for a more idiomatic approach
+      const result = await db.select({ count: count() }).from(ingredients).get()
+
       return result?.count || 0
     },
-    enabled: true,
+    enabled: isInitialized && !!db,
   })
 
   // Add ingredient mutation
   const addIngredientMutation = useMutation({
     mutationFn: async (ingredient: Omit<Ingredient, 'id'>) => {
-      await waitForDB()
+      if (!db) throw new Error('Database not initialized')
+      console.log('inserting ingredient', ingredient)
       return await db.insert(ingredients).values(ingredient).returning()
     },
     onSuccess: () => {
@@ -123,17 +126,8 @@ function RouteComponent() {
     const randomIngredient = {
       title: faker.commerce.productName(),
       description: faker.commerce.productDescription(),
-      unitOfMeasurement: faker.helpers.arrayElement([
-        'grams',
-        'kilograms',
-        'ounces',
-        'pounds',
-        'cups',
-        'tablespoons',
-        'teaspoons',
-        'pieces',
-      ]),
-      baseValue: parseFloat(
+      unit_of_measurement: faker.helpers.arrayElement(unitsOfMeasurement),
+      base_value: parseFloat(
         faker.commerce.price({ min: 0.1, max: 100, dec: 2 }),
       ),
     }
@@ -184,14 +178,14 @@ function RouteComponent() {
         enableColumnFilter: false,
       },
       {
-        accessorKey: 'unitOfMeasurement',
+        accessorKey: 'unit_of_measurement',
         header: 'Unit',
         cell: (info) => info.getValue() || 'N/A',
         enableSorting: true,
         enableColumnFilter: false,
       },
       {
-        accessorKey: 'baseValue',
+        accessorKey: 'base_value',
         header: 'Base Value',
         cell: (info) => `$${Number(info.getValue()).toFixed(2)}`,
         enableSorting: true,
@@ -277,14 +271,23 @@ function RouteComponent() {
                   Manage your ingredients with ease
                 </CardDescription>
               </div>
-              <Button
-                onClick={addRandomIngredient}
-                disabled={addIngredientMutation.isPending}
-              >
-                {addIngredientMutation.isPending
-                  ? 'Adding...'
-                  : 'Add Random Ingredient'}
-              </Button>
+              <div className="flex gap-2">
+                <Button
+                  onClick={addRandomIngredient}
+                  disabled={addIngredientMutation.isPending}
+                >
+                  {addIngredientMutation.isPending
+                    ? 'Adding...'
+                    : 'Add Random Ingredient'}
+                </Button>
+                <Button
+                  onClick={resetDatabase}
+                  variant="destructive"
+                  disabled={!isInitialized}
+                >
+                  Reset Database
+                </Button>
+              </div>
             </div>
           </CardHeader>
 
