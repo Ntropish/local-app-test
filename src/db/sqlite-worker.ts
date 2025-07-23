@@ -144,14 +144,6 @@ self.onmessage = async (msg) => {
         }
         break
       }
-
-      /* legacy exec for backward compatibility */
-      case 'exec': {
-        // Route to exec-all for backward compatibility
-        msg.data.type = 'exec-all'
-        self.onmessage?.(msg)
-        break
-      }
     }
   } catch (e) {
     error('Error in worker', e)

@@ -235,26 +235,28 @@ export const DatabaseProvider: React.FC<DatabaseProviderProps> = ({
   const executeQuery = useCallback(
     async (currentWorker: Worker, sql: string, params: any[] = []) => {
       const id = uuid()
-      return new Promise((resolve, reject) => {
-        const tempAwaiting = { [id]: { resolve, reject } }
+      return new Promise<{ rows: any[]; columns: string[] }>(
+        (resolve, reject) => {
+          const tempAwaiting = { [id]: { resolve, reject } }
 
-        const tempHandler = (e: MessageEvent) => {
-          const { type, payload } = e.data
-          if (type === 'exec-finished' && payload.id === id) {
-            currentWorker.removeEventListener('message', tempHandler)
-            resolve(payload)
-          } else if (type === 'exec-error' && payload.id === id) {
-            currentWorker.removeEventListener('message', tempHandler)
-            reject(new Error(payload.error))
+          const tempHandler = (e: MessageEvent) => {
+            const { type, payload } = e.data
+            if (type === 'exec-finished' && payload.id === id) {
+              currentWorker.removeEventListener('message', tempHandler)
+              resolve(payload)
+            } else if (type === 'exec-error' && payload.id === id) {
+              currentWorker.removeEventListener('message', tempHandler)
+              reject(new Error(payload.error))
+            }
           }
-        }
 
-        currentWorker.addEventListener('message', tempHandler)
-        currentWorker.postMessage({
-          type: 'exec',
-          payload: { id, sql, params },
-        })
-      })
+          currentWorker.addEventListener('message', tempHandler)
+          currentWorker.postMessage({
+            type: 'exec-all',
+            payload: { id, sql, params },
+          })
+        },
+      )
     },
     [],
   )
@@ -332,7 +334,10 @@ export const DatabaseProvider: React.FC<DatabaseProviderProps> = ({
       try {
         // Create a temporary db instance for seeding
         const tempDb = drizzle(
-          async (sql: string, params: any[]) => {
+          async (
+            sql: string,
+            params: any[],
+          ): Promise<{ rows: any[]; columns: string[] }> => {
             const result = await executeQuery(currentWorker, sql, params)
             return result
           },
@@ -429,6 +434,14 @@ export const DatabaseProvider: React.FC<DatabaseProviderProps> = ({
       }
     }
   }, [worker])
+
+  // Assign resetDatabase to window for development
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      // @ts-ignore
+      window.resetDatabase = resetDatabase
+    }
+  }, [resetDatabase])
 
   const value: DatabaseContextType = {
     db,
