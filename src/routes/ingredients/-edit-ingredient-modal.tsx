@@ -59,9 +59,28 @@ export function EditIngredientModal({
         .from(ingredients)
         .where(eq(ingredients.id, editId))
         .get()
+
+      // Handle the nested array structure
+      if (result && typeof result === 'object' && Array.isArray(result.id)) {
+        const data = result.id
+        return {
+          id: data[0],
+          title: data[1],
+          description: data[2],
+          unitOfMeasurement: data[3],
+          baseValue: data[4],
+        }
+      }
       return result || null
     },
     enabled: !!editId,
+  })
+
+  console.log({
+    ingredient,
+    editId,
+    isLoading,
+    formData,
   })
 
   // Update form data when ingredient is loaded
