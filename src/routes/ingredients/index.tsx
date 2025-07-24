@@ -280,11 +280,7 @@ function RouteComponent() {
                     ? 'Adding...'
                     : 'Add Random Ingredient'}
                 </Button>
-                <Button
-                  onClick={resetDatabase}
-                  variant="destructive"
-                  disabled={!isInitialized}
-                >
+                <Button onClick={resetDatabase} variant="destructive">
                   Reset Database
                 </Button>
               </div>
